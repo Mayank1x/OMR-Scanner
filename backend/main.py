@@ -1,8 +1,9 @@
 import cv2
 import numpy as np
 import csv
-from typing import List, Dict, Any
-from fastapi import FastAPI, UploadFile, File, HTTPException
+import json
+from typing import List, Dict, Any, Optional
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 import io
 
@@ -20,9 +21,9 @@ app.add_middleware(
 # Constants for image processing
 CANNY_THRESH1 = 50
 CANNY_THRESH2 = 150
-BUBBLE_MIN_AREA = 100
-BUBBLE_ASPECT_RATIO_MIN = 0.8
-BUBBLE_ASPECT_RATIO_MAX = 1.2
+BUBBLE_MIN_AREA = 50
+BUBBLE_ASPECT_RATIO_MIN = 0.5
+BUBBLE_ASPECT_RATIO_MAX = 1.6
 
 def process_omr_image(image_bytes: bytes, answer_key: Dict[int, int]) -> Dict[str, Any]:
     # 1. Convert bytes to numpy array then to cv2 image
@@ -213,23 +214,31 @@ def parse_csv_to_dict(csv_bytes: bytes) -> Dict[int, int]:
 @app.post("/grade-omr-bulk/")
 async def grade_omr_bulk(
     images: List[UploadFile] = File(...),
-    answer_key_csv: UploadFile = File(...)
+    answer_key_csv: Optional[UploadFile] = File(None),
+    answer_key_json: Optional[str] = Form(None)
 ):
     """
     Accepts:
-    1. A single CSV file containing the answer key
+    1. A CSV file OR a JSON string containing the answer key
     2. A list of image files (students' OMR sheets)
     Returns list of score dictionaries.
     """
     
+    answer_key = None
+    
     try:
-        csv_bytes = await answer_key_csv.read()
-        answer_key = parse_csv_to_dict(csv_bytes)
-        
+        if answer_key_csv:
+            csv_bytes = await answer_key_csv.read()
+            answer_key = parse_csv_to_dict(csv_bytes)
+        elif answer_key_json:
+            raw_dict = json.loads(answer_key_json)
+            # Ensure keys and values are ints
+            answer_key = {int(k): int(v) for k, v in raw_dict.items()}
+            
         if not answer_key:
-             raise HTTPException(status_code=400, detail="Invalid or empty Answer Key CSV")
+             raise HTTPException(status_code=400, detail="Missing or invalid Answer Key (CSV or JSON)")
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Failed to parse CSV: {str(e)}")
+        raise HTTPException(status_code=400, detail=f"Failed to parse Answer Key: {str(e)}")
 
     batch_results = []
     
