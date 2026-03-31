@@ -1,0 +1,38 @@
+# Python / Backend
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.env
+.env.local
+venv/
+env/
+.venv/
+env.bak/
+venv.bak/
+
+# Node / Frontend
+node_modules/
+dist/
+dist-ssr/
+build/
+.npm/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Next.js / Vite build output
+.next/
+out/
+vite.config.js.timestamp-*
+
+# OS / Editor Files
+.DS_Store
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Temporary Test Files
+tests/mock*.jpg
+tests/mock*.png

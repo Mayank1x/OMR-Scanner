@@ -1,214 +1,175 @@
+import json
+import base64
 import cv2
 import numpy as np
-import csv
-import json
+import os
+from dotenv import load_dotenv
 from typing import List, Dict, Any, Optional
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-import io
+from huggingface_hub import InferenceClient
 
-app = FastAPI(title="OMR Scanner API")
+load_dotenv()
 
-# Configure CORS
+app = FastAPI()
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Allows all origins
+    allow_origins=["*"],
     allow_credentials=True,
-    allow_methods=["*"],  # Allows all methods
-    allow_headers=["*"],  # Allows all headers
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
-# Constants for image processing
-CANNY_THRESH1 = 50
-CANNY_THRESH2 = 150
-BUBBLE_MIN_AREA = 50
-BUBBLE_ASPECT_RATIO_MIN = 0.5
-BUBBLE_ASPECT_RATIO_MAX = 1.6
+# You can configure the HF API Key in a .env file: HF_API_KEY=your_token_here
+hf_token = os.getenv("HF_API_KEY")
+
+# VLM model robust for OCR and OMR layouts
+MODEL_ID = "Qwen/Qwen2.5-VL-7B-Instruct"
+client = InferenceClient(MODEL_ID, token=hf_token)
+
+def compress_image_for_api(image_bytes: bytes) -> str:
+    """Downscales the image to ensure it fits comfortably in HuggingFace free tier payloads."""
+    np_arr = np.frombuffer(image_bytes, np.uint8)
+    img = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+    
+    if img is None:
+        raise ValueError("Invalid image uploaded.")
+        
+    h, w = img.shape[:2]
+    max_dim = 1200
+    if max(h, w) > max_dim:
+        scale = max_dim / max(h, w)
+        img = cv2.resize(img, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
+        
+    _, buffer = cv2.imencode('.jpg', img, [cv2.IMWRITE_JPEG_QUALITY, 85])
+    return base64.b64encode(buffer).decode("utf-8")
 
 def process_omr_image(image_bytes: bytes, answer_key: Dict[int, int]) -> Dict[str, Any]:
-    # 1. Convert bytes to numpy array then to cv2 image
-    nparr = np.frombuffer(image_bytes, np.uint8)
-    img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+    # 1. Compress and encode image for the API
+    encoded_img = compress_image_for_api(image_bytes)
+    img_url = f"data:image/jpeg;base64,{encoded_img}"
 
-    if img is None:
-        raise ValueError("Could not decode image.")
+    # 2. Craft exact VLM Prompt
+    prompt = """
+You are a highly precise Optical Mark Recognition (OMR) scanner. 
+I am providing you an image of an OMR answer sheet containing multiple columns of questions. 
+Your task is to identify the filled answer for each question perfectly. 
 
-    # Convert to Grayscale & Gaussian Blur
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+Output your findings STRICTLY as a JSON object where the keys are the continuous Question Numbers (starting from 1, e.g. "1", "2", "3"...) and the values are integers mapping to the filled option (0 for A, 1 for B, 2 for C, 3 for D). 
+- If multiple bubbles are filled for a single question, output -1.
+- If no bubbles are filled, output null.
 
-    # Canny Edge Detection
-    edged = cv2.Canny(blurred, CANNY_THRESH1, CANNY_THRESH2)
+Example format:
+{
+  "1": 0,
+  "2": 1,
+  "3": 3,
+  "4": -1,
+  "5": null
+}
 
-    # Contour detection for document boundary
-    contours, _ = cv2.findContours(edged.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    doc_cnt = None
-
-    if len(contours) > 0:
-        # Sort contours by area in descending order
-        contours = sorted(contours, key=cv2.contourArea, reverse=True)
-        for c in contours:
-            peri = cv2.arcLength(c, True)
-            approx = cv2.approxPolyDP(c, 0.02 * peri, True)
-            # If our approximated contour has four points, we can assume it's the paper
-            if len(approx) == 4:
-                doc_cnt = approx
-                break
+Do NOT output any markdown tags. Output ONLY the raw JSON string parsing all visible questions on the page.
+"""
     
-    # If no document was found, let's just attempt to process the whole image natively or raise error
-    if doc_cnt is not None:
-        # Perspective Transform
-        # Obtain bird's eye view
-        doc_cnt = doc_cnt.reshape(4, 2)
+    try:
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image_url", "image_url": {"url": img_url}},
+                    {"type": "text", "text": prompt},
+                ],
+            }
+        ]
         
-        # Order points: Top-left, Top-right, Bottom-right, Bottom-left
-        rect = np.zeros((4, 2), dtype="float32")
-        s = doc_cnt.sum(axis=1)
-        rect[0] = doc_cnt[np.argmin(s)]
-        rect[2] = doc_cnt[np.argmax(s)]
-        diff = np.diff(doc_cnt, axis=1)
-        rect[1] = doc_cnt[np.argmin(diff)]
-        rect[3] = doc_cnt[np.argmax(diff)]
-
-        (tl, tr, br, bl) = rect
-        widthA = np.sqrt(((br[0] - bl[0]) ** 2) + ((br[1] - bl[1]) ** 2))
-        widthB = np.sqrt(((tr[0] - tl[0]) ** 2) + ((tr[1] - tl[1]) ** 2))
-        maxWidth = max(int(widthA), int(widthB))
-
-        heightA = np.sqrt(((tr[0] - br[0]) ** 2) + ((tr[1] - br[1]) ** 2))
-        heightB = np.sqrt(((tl[0] - bl[0]) ** 2) + ((tl[1] - bl[1]) ** 2))
-        maxHeight = max(int(heightA), int(heightB))
-
-        dst = np.array([
-            [0, 0],
-            [maxWidth - 1, 0],
-            [maxWidth - 1, maxHeight - 1],
-            [0, maxHeight - 1]], dtype="float32")
-
-        M = cv2.getPerspectiveTransform(rect, dst)
-        warped = cv2.warpPerspective(gray, M, (maxWidth, maxHeight))
-    else:
-        warped = gray.copy() # Fallback
-
-    # Otsu's thresholding for binarization
-    thresh = cv2.threshold(warped, 0, 255, cv2.THRESH_BINARY_INV | cv2.THRESH_OTSU)[1]
-
-    # Contour detection for bubbles
-    cnts, _ = cv2.findContours(thresh.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    question_cnts = []
-
-    for c in cnts:
-        (x, y, w, h) = cv2.boundingRect(c)
-        ar = w / float(h)
-        area = cv2.contourArea(c)
+        # Fire request to Hugging Face Free Inference API
+        response = client.chat_completion(messages=messages, max_tokens=2500)
+        raw_output = response.choices[0].message.content.strip()
         
-        # Filtering by circular aspect ratio and area
-        if area >= BUBBLE_MIN_AREA and BUBBLE_ASPECT_RATIO_MIN <= ar <= BUBBLE_ASPECT_RATIO_MAX:
-            question_cnts.append(c)
+        # Strip potential markdown formatting that VLMs sometimes append
+        if "```" in raw_output:
+             raw_output = raw_output.split("```")[1]
+             if raw_output.startswith("json"):
+                 raw_output = raw_output[4:].strip()
+            
+        detected_answers = json.loads(raw_output)
+        
+    except Exception as e:
+        err_msg = str(e)
+        if "Authorization header is correct" in err_msg or "401" in err_msg:
+             raise Exception("Hugging Face API Authentication failed! Please add your HF_API_KEY to the backend/.env file.")
+        raise Exception(f"Hugging Face Vision API Error: {err_msg}")
 
-    # Sort top to bottom
-    if len(question_cnts) == 0:
-        raise ValueError("Could not find any circular bubbles on the document. Ensure image is clear.")
-    
-    def get_cnt_y(c):
-        M = cv2.moments(c)
-        try: return int(M["m01"] / M["m00"])
-        except: return cv2.boundingRect(c)[1]
-    
-    question_cnts = sorted(question_cnts, key=get_cnt_y)
-    
-    options_per_q = 4
-    
+    # 3. Grade the parsed JSON against the Teacher's Answer Key
     score = 0
     results = []
     
-    # Group by rows
-    total_questions = len(question_cnts) // options_per_q
+    # Dynamic range to capture everything generated by the VLM
+    max_questions = max(len(answer_key), len(detected_answers)) if answer_key else len(detected_answers)
     
-    # We sort each group (row) left-to-right
-    for (q, i) in enumerate(range(0, len(question_cnts), options_per_q)):
-        if i + options_per_q > len(question_cnts):
-            break
+    for q_idx in range(max_questions):
+        question_num = q_idx + 1 # 1-indexed UI mapping
+        
+        expected_ans = answer_key.get(q_idx)
+        
+        # Ensure we check string representation since JSON keys are strings
+        bubbled_val = detected_answers.get(str(question_num), None)
+        
+        if bubbled_val is not None:
+            try:
+                bubbled = int(bubbled_val)
+            except ValueError:
+                bubbled = None
+        else:
+            bubbled = None
             
-        row_cnts = question_cnts[i:i + options_per_q]
-        row_cnts = sorted(row_cnts, key=lambda c: cv2.boundingRect(c)[0])
-        
-        bubbled = None
-        max_pixels = 0
-        
-        for (j, c) in enumerate(row_cnts):
-            # Mask the bubble
-            mask = np.zeros(thresh.shape, dtype="uint8")
-            cv2.drawContours(mask, [c], -1, 255, -1)
-
-            # Count non-zero pixels inside bubble mask
-            mask = cv2.bitwise_and(thresh, thresh, mask=mask)
-            total_pixels = cv2.countNonZero(mask)
-
-            if bubbled is None or total_pixels > max_pixels:
-                bubbled = j
-                max_pixels = total_pixels
-                
-        # Compare with answer key
         correct = False
-        
-        expected_ans = answer_key.get(q)
-        if expected_ans == bubbled:
+        if bubbled is not None and bubbled != -1 and expected_ans == bubbled:
             correct = True
             score += 1
 
         results.append({
-            "question_num": q + 1,        # 1-indexed for display
+            "question_num": question_num,
             "selected_option": bubbled,
             "correct_option": expected_ans,
-            "is_correct": correct
+            "is_correct": correct,
+            "is_multiple": bubbled == -1
         })
-        
+
+    max_score = len(answer_key) if answer_key and len(answer_key) > 0 else max_questions
+    
     return {
         "score": score,
-        "max_score": len(answer_key),
-        "results": results,
+        "max_score": max_score,
+        "results": results
     }
 
 def parse_csv_to_dict(csv_bytes: bytes) -> Dict[int, int]:
-    # Expects format like:
-    # QuestionNum,OptionIdx
-    # 1,1
-    # 2,2
-    # etc...
-    # Where QuestionNum is 1-indexed in CSV, but our dictionary uses 0-indexed internally
-    csv_str = csv_bytes.decode('utf-8')
-    reader = csv.reader(io.StringIO(csv_str))
-    
-    # Convert options: might be numbers (0,1,2,3) or letters A,B,C,D
-    def char_to_idx(val: str) -> int:
-        val = val.strip().upper()
-        if val in ['A', 'B', 'C', 'D']:
-             return {'A': 0, 'B': 1, 'C': 2, 'D': 3}[val]
-        if val.isdigit():
-             return int(val)
-        return -1
-        
+    # Dynamic CSV parsing handling Option characters A/B/C/D into integers 0/1/2/3
+    lines = csv_bytes.decode("utf-8").splitlines()
     answer_key = {}
-    header_skipped = False
     
-    for row in reader:
-        if not row or len(row) < 2: 
+    for line in lines:
+        if not line.strip() or "," not in line:
             continue
+        parts = line.split(",")
         try:
-            q_num_str = row[0].strip()
-            # If header row
-            if not q_num_str.isdigit() and not header_skipped:
-                header_skipped = True
-                continue
+            # 1-indexed to 0-indexed internal standard
+            q_num = int(parts[0].strip()) - 1 
+            ans_str = parts[1].strip().upper()
+            
+            # Map A->0, B->1, C->2, D->3
+            if ans_str == "A": ans_idx = 0
+            elif ans_str == "B": ans_idx = 1
+            elif ans_str == "C": ans_idx = 2
+            elif ans_str == "D": ans_idx = 3
+            else: ans_idx = int(ans_str) 
                 
-            q_num = int(q_num_str) - 1 # 0-indexed internally
-            opt_idx = char_to_idx(row[1])
-            if opt_idx >= 0:
-                answer_key[q_num] = opt_idx
+            answer_key[q_num] = ans_idx
         except ValueError:
-             pass # skip broken lines
-
+            pass # Skip invalid rows
+            
     return answer_key
 
 @app.post("/grade-omr-bulk/")
@@ -219,9 +180,9 @@ async def grade_omr_bulk(
 ):
     """
     Accepts:
-    1. A CSV file OR a JSON string containing the answer key
+    1. A CSV file OR a JSON string containing the master answer key
     2. A list of image files (students' OMR sheets)
-    Returns list of score dictionaries.
+    Returns Hugging Face verified grading scores metrics.
     """
     
     answer_key = None
@@ -232,31 +193,30 @@ async def grade_omr_bulk(
             answer_key = parse_csv_to_dict(csv_bytes)
         elif answer_key_json:
             raw_dict = json.loads(answer_key_json)
-            # Ensure keys and values are ints
+            # Ensure keys and values are correctly converted to ints
             answer_key = {int(k): int(v) for k, v in raw_dict.items()}
             
         if not answer_key:
              raise HTTPException(status_code=400, detail="Missing or invalid Answer Key (CSV or JSON)")
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Failed to parse Answer Key: {str(e)}")
+        raise HTTPException(status_code=400, detail=f"Failed to parse Answer Key Context: {str(e)}")
 
     batch_results = []
     
-    for img_file in images:
+    for image in images:
         try:
-            img_bytes = await img_file.read()
-            res = process_omr_image(img_bytes, answer_key)
-            
+            img_bytes = await image.read()
+            student_result = process_omr_image(img_bytes, answer_key)
             batch_results.append({
-                "filename": img_file.filename,
+                "filename": image.filename,
                 "success": True,
-                "data": res
+                "data": student_result
             })
         except Exception as e:
             batch_results.append({
-                "filename": img_file.filename,
+                "filename": image.filename,
                 "success": False,
                 "error": str(e)
             })
-
+            
     return {"batch_results": batch_results}

@@ -215,6 +215,7 @@ export default function App() {
   };
 
   const getOptionLetter = (idx) => {
+    if (idx === -1) return "MULTI";
     if (idx === null || idx === undefined || idx < 0) return "-";
     return String.fromCharCode(65 + idx);
   };
