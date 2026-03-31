@@ -39,7 +39,14 @@ function Sidebar({ activeTab, setActiveTab }) {
       </nav>
 
       <div className="mt-auto pt-6 border-t border-zinc-800/60">
-        <button className="w-full flex items-center gap-3 px-4 py-3 rounded-xl text-zinc-500 hover:text-zinc-300 transition-all text-sm font-medium">
+        <button 
+          onClick={() => setActiveTab('settings')}
+          className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl transition-all text-sm font-medium ${
+            activeTab === 'settings' 
+              ? 'bg-zinc-800 text-white' 
+              : 'text-zinc-500 hover:text-zinc-300'
+          }`}
+        >
           <Settings className="w-5 h-5" />
           Settings
         </button>
@@ -195,6 +202,83 @@ function AnalyticsDashboard({ results }) {
   );
 }
 
+function SettingsDashboard({ darkMode, setDarkMode, exportFormat, setExportFormat }) {
+  return (
+    <div className="animate-in fade-in slide-in-from-bottom-4 duration-500">
+      <div className="flex items-center justify-between mb-8">
+        <div>
+          <h2 className="text-3xl font-bold text-white mb-2">Settings</h2>
+          <p className="text-zinc-400">Manage your system configurations and AI engine integrations.</p>
+        </div>
+      </div>
+      
+      <div className="bg-zinc-900 border border-zinc-800 rounded-2xl p-8 space-y-8">
+        <div>
+           <h3 className="text-xl font-semibold text-white mb-4">AI Engine Configuration</h3>
+           <div className="bg-zinc-950 border border-zinc-800 rounded-xl p-6">
+              <div className="flex justify-between items-center mb-3">
+                 <span className="text-zinc-300 font-medium tracking-wide">Current Inference Model</span>
+                 <span className="px-3 py-1 bg-emerald-500/10 text-emerald-400 text-xs font-bold rounded-lg border border-emerald-500/20 uppercase tracking-widest">Active</span>
+              </div>
+              <p className="text-lg font-mono text-indigo-300 bg-indigo-500/10 border border-indigo-500/20 p-3 rounded-lg mb-4">Qwen/Qwen2.5-VL-7B-Instruct</p>
+              <p className="text-sm text-zinc-400 leading-relaxed">
+                This powerful Vision-Language Model is executed remotely via the Hugging Face Free Inference API. Authentication is managed securely via your Python FastApi backend <code className="text-zinc-300 bg-zinc-800 px-1 rounded">.env</code> file. Do not expose or commit your API tokens.
+              </p>
+           </div>
+        </div>
+        
+        <div className="pt-8 border-t border-zinc-800">
+           <h3 className="text-xl font-semibold text-white mb-6">Application Preferences</h3>
+           
+           <div className="space-y-6">
+             <div className="flex items-center justify-between text-zinc-300 bg-zinc-950 border border-zinc-800 p-4 rounded-xl">
+                <div>
+                  <p className="font-semibold text-white">Dark Mode Interface</p>
+                  <p className="text-sm text-zinc-500 mt-1">Force professional dark UI theme</p>
+                </div>
+                <button 
+                  onClick={() => setDarkMode(!darkMode)}
+                  className={`w-12 h-6 rounded-full relative transition-colors duration-300 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2 focus:ring-offset-zinc-900 ${
+                    darkMode ? 'bg-indigo-500 shadow-[0_0_10px_rgba(99,102,241,0.4)]' : 'bg-zinc-700'
+                  }`}
+                >
+                  <div className={`absolute top-1 w-4 h-4 rounded-full bg-white transition-transform duration-300 ${
+                    darkMode ? 'right-1' : 'left-1'
+                  }`}></div>
+                </button>
+             </div>
+             
+             <div className="flex items-center justify-between text-zinc-300 bg-zinc-950 border border-zinc-800 p-4 rounded-xl">
+                <div>
+                  <p className="font-semibold text-white">Data Export Format</p>
+                  <p className="text-sm text-zinc-500 mt-1">Format for downloading grading results</p>
+                </div>
+                <div className="flex bg-zinc-800 rounded-lg p-1 border border-zinc-700">
+                  <button 
+                    onClick={() => setExportFormat('CSV')}
+                    className={`px-4 py-1.5 text-sm font-medium rounded-md transition-all ${
+                      exportFormat === 'CSV' ? 'bg-indigo-500 text-white shadow-sm' : 'text-zinc-400 hover:text-zinc-200'
+                    }`}
+                  >
+                    .CSV
+                  </button>
+                  <button 
+                    onClick={() => setExportFormat('JSON')}
+                    className={`px-4 py-1.5 text-sm font-medium rounded-md transition-all ${
+                      exportFormat === 'JSON' ? 'bg-indigo-500 text-white shadow-sm' : 'text-zinc-400 hover:text-zinc-200'
+                    }`}
+                  >
+                    .JSON
+                  </button>
+                </div>
+             </div>
+           </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function App() {
   const [activeTab, setActiveTab] = useState('dashboard');
   const [images, setImages] = useState([]);
@@ -206,6 +290,10 @@ export default function App() {
   const [results, setResults] = useState(null);
   const [error, setError] = useState(null);
   const [expandedRow, setExpandedRow] = useState(null);
+  
+  // Settings State
+  const [darkMode, setDarkMode] = useState(true);
+  const [exportFormat, setExportFormat] = useState('CSV');
 
   const handleImageChange = (e) => {
     if (e.target.files) setImages(Array.from(e.target.files));
@@ -267,30 +355,43 @@ export default function App() {
     }
   };
 
-  const downloadCsv = () => {
+  const downloadResults = () => {
     if (!results) return;
-    const rows = [["Filename", "Score", "Max Score", "Success", "Error"]];
-    results.forEach(r => {
-      rows.push([
-        r.filename, 
-        r.success ? r.data.score : 0, 
-        r.success ? r.data.max_score : 0, 
-        r.success, 
-        r.error || ""
-      ]);
-    });
-    const csvContent = "data:text/csv;charset=utf-8," + rows.map(e => e.join(",")).join("\n");
-    const encodedUri = encodeURI(csvContent);
+    
+    let content, mimeType, extension;
+
+    if (exportFormat === 'CSV') {
+        const rows = [["Filename", "Score", "Max Score", "Success", "Error"]];
+        results.forEach(r => {
+          rows.push([
+            r.filename, 
+            r.success ? r.data.score : 0, 
+            r.success ? r.data.max_score : 0, 
+            r.success, 
+            r.error || ""
+          ]);
+        });
+        content = rows.map(e => e.join(",")).join("\n");
+        mimeType = "data:text/csv;charset=utf-8,";
+        extension = "csv";
+    } else {
+        // Export highly structured JSON Format
+        content = JSON.stringify(results, null, 2);
+        mimeType = "data:application/json;charset=utf-8,";
+        extension = "json";
+    }
+
+    const encodedUri = encodeURI(mimeType + content);
     const link = document.createElement("a");
     link.setAttribute("href", encodedUri);
-    link.setAttribute("download", "omr_grading_results.csv");
+    link.setAttribute("download", `omr_grading_results.${extension}`);
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
   };
 
   return (
-    <div className="min-h-screen bg-zinc-950 text-zinc-100 font-sans selection:bg-indigo-500/30 flex">
+    <div className={`min-h-screen text-zinc-100 font-sans selection:bg-indigo-500/30 flex transition-colors duration-500 ${darkMode ? 'bg-zinc-950' : 'bg-[#18181b]'}`}>
       <Sidebar activeTab={activeTab} setActiveTab={setActiveTab} />
       
       <main className="flex-1 ml-64 p-10 max-w-6xl">
@@ -301,6 +402,15 @@ export default function App() {
 
         {activeTab === 'analytics' && (
           <AnalyticsDashboard results={results} />
+        )}
+
+        {activeTab === 'settings' && (
+          <SettingsDashboard 
+            darkMode={darkMode} 
+            setDarkMode={setDarkMode}
+            exportFormat={exportFormat}
+            setExportFormat={setExportFormat}
+          />
         )}
 
         {activeTab === 'dashboard' && (
@@ -394,8 +504,8 @@ export default function App() {
               <div className="mt-12 space-y-6">
                 <div className="flex items-center justify-between pb-4 border-b border-zinc-800">
                   <h2 className="text-xl font-bold">Grading Results</h2>
-                  <button onClick={downloadCsv} className="flex items-center gap-2 px-4 py-2 bg-zinc-800 hover:bg-zinc-700 text-sm font-medium text-white rounded-lg transition-colors border border-zinc-700">
-                    <Download className="w-4 h-4" /> Export CSV
+                  <button onClick={downloadResults} className="flex items-center gap-2 px-4 py-2 bg-zinc-800 hover:bg-zinc-700 text-sm font-medium text-white rounded-lg transition-colors border border-zinc-700">
+                    <Download className="w-4 h-4" /> Export {exportFormat}
                   </button>
                 </div>
                 

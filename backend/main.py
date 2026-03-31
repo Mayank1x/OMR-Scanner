@@ -9,7 +9,8 @@ from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from huggingface_hub import InferenceClient
 
-load_dotenv()
+# Hot-reload the environment variables dynamically
+load_dotenv(override=True)
 
 app = FastAPI()
 
